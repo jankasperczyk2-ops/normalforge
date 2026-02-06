@@ -1,21 +1,23 @@
 bl_info = {
-    "name": "Non-Destructive Custom Normals",
+    "name": "Auto Custom Normals",
     "author": "Your Name",
-    "version": (1, 1, 0),
+    "version": (2, 0, 0),
     "blender": (4, 0, 0),
-    "location": "View3D > Sidebar > Normals",
+    "location": "View3D > Sidebar > Auto Custom Normals",
     "description": "One-click bevel + custom normals workflow for game-ready meshes",
-    "category": "Object",
+    "category": "Mesh",
 }
 
 import bpy
 import bmesh
-import math
 from bpy.types import Operator, Panel, PropertyGroup
-from bpy.props import FloatProperty, EnumProperty, IntProperty
+from bpy.props import FloatProperty, IntProperty
+
+ACN_MATERIAL_NAME = "_ACN_BevelTag"
+ACN_BACKUP_SUFFIX = "_ACN_Backup"
 
 
-class NDN_Properties(PropertyGroup):
+class ACN_Properties(PropertyGroup):
     bevel_width: FloatProperty(
         name="Bevel Width",
         description="Width of the bevel",
@@ -52,15 +54,6 @@ def ensure_object_mode(context):
 def ensure_edit_mode(context):
     if context.object and context.object.mode != 'EDIT':
         bpy.ops.object.mode_set(mode='EDIT')
-
-
-def deselect_all_edges(bm):
-    for e in bm.edges:
-        e.select = False
-    for f in bm.faces:
-        f.select = False
-    for v in bm.verts:
-        v.select = False
 
 
 def get_bevel_weight_layer(bm):
@@ -117,32 +110,74 @@ def mark_seams_from_bevel_weight(bm):
     return count
 
 
-def add_bevel_modifier(obj, width, segments):
-    bevel_mod = obj.modifiers.new(name="NDN_Bevel", type='BEVEL')
+def get_or_create_tag_material():
+    mat = bpy.data.materials.get(ACN_MATERIAL_NAME)
+    if mat is None:
+        mat = bpy.data.materials.new(name=ACN_MATERIAL_NAME)
+        mat.diffuse_color = (1.0, 0.0, 1.0, 0.5)
+    return mat
+
+
+def setup_material_tagging(obj):
+    tag_mat = get_or_create_tag_material()
+
+    tag_slot_index = None
+    for i, slot in enumerate(obj.material_slots):
+        if slot.material and slot.material.name == ACN_MATERIAL_NAME:
+            tag_slot_index = i
+            break
+
+    if tag_slot_index is None:
+        obj.data.materials.append(tag_mat)
+        tag_slot_index = len(obj.material_slots) - 1
+
+    return tag_slot_index
+
+
+def cleanup_tag_material(obj):
+    tag_index = None
+    for i, slot in enumerate(obj.material_slots):
+        if slot.material and slot.material.name == ACN_MATERIAL_NAME:
+            tag_index = i
+            break
+
+    if tag_index is not None:
+        obj.active_material_index = tag_index
+        bpy.ops.object.material_slot_remove()
+
+    tag_mat = bpy.data.materials.get(ACN_MATERIAL_NAME)
+    if tag_mat and tag_mat.users == 0:
+        bpy.data.materials.remove(tag_mat)
+
+
+def add_bevel_modifier(obj, width, segments, tag_material_index):
+    bevel_mod = obj.modifiers.new(name="ACN_Bevel", type='BEVEL')
     bevel_mod.limit_method = 'WEIGHT'
     bevel_mod.width = width
     bevel_mod.segments = segments
     bevel_mod.affect = 'EDGES'
     bevel_mod.harden_normals = False
+    bevel_mod.material = tag_material_index
     return bevel_mod
 
 
-def get_bevel_face_indices(obj, bm_before):
-    before_face_count = len(bm_before.faces)
-    return before_face_count
-
-
-def select_original_faces(obj, original_face_count):
+def select_original_faces_by_material(obj, tag_material_index):
     ensure_edit_mode(bpy.context)
     bm = bmesh.from_edit_mesh(obj.data)
     bm.faces.ensure_lookup_table()
 
-    deselect_all_edges(bm)
+    for v in bm.verts:
+        v.select = False
+    for e in bm.edges:
+        e.select = False
+    for f in bm.faces:
+        f.select = False
+
     bpy.context.tool_settings.mesh_select_mode = (False, False, True)
 
     selected = 0
-    for i, face in enumerate(bm.faces):
-        if i < original_face_count:
+    for face in bm.faces:
+        if face.material_index != tag_material_index:
             face.select = True
             selected += 1
 
@@ -158,9 +193,72 @@ def set_normals_from_faces(context):
         pass
 
 
-class NDN_OT_from_sharp(Operator):
+def create_mesh_backup(obj):
+    backup_name = obj.data.name + ACN_BACKUP_SUFFIX
+    existing = bpy.data.meshes.get(backup_name)
+    if existing:
+        bpy.data.meshes.remove(existing)
+
+    backup_mesh = obj.data.copy()
+    backup_mesh.name = backup_name
+    return backup_mesh
+
+
+def restore_mesh_backup(obj):
+    backup_name = obj.data.name + ACN_BACKUP_SUFFIX
+    if obj.data.name.endswith(ACN_BACKUP_SUFFIX):
+        backup_name = obj.data.name
+
+    backup_mesh = bpy.data.meshes.get(backup_name)
+    if backup_mesh is None:
+        original_name = obj.data.name
+        backup_name = original_name + ACN_BACKUP_SUFFIX
+        backup_mesh = bpy.data.meshes.get(backup_name)
+
+    if backup_mesh is None:
+        return False
+
+    current_mesh = obj.data
+    new_mesh = backup_mesh.copy()
+    new_mesh.name = current_mesh.name
+
+    obj.data = new_mesh
+
+    bpy.data.meshes.remove(current_mesh)
+
+    leftover = bpy.data.meshes.get(backup_name)
+    if leftover:
+        bpy.data.meshes.remove(leftover)
+
+    return True
+
+
+def has_backup(obj):
+    backup_name = obj.data.name + ACN_BACKUP_SUFFIX
+    return bpy.data.meshes.get(backup_name) is not None
+
+
+def run_workflow(obj, props):
+    tag_index = setup_material_tagging(obj)
+
+    bevel_mod = add_bevel_modifier(obj, props.bevel_width, props.bevel_segments, tag_index)
+
+    bpy.ops.object.modifier_apply(modifier=bevel_mod.name)
+
+    selected = select_original_faces_by_material(obj, tag_index)
+
+    set_normals_from_faces(bpy.context)
+
+    ensure_object_mode(bpy.context)
+
+    cleanup_tag_material(obj)
+
+    return selected
+
+
+class ACN_OT_from_sharp(Operator):
     """Full workflow starting from sharp edges"""
-    bl_idname = "object.ndn_from_sharp"
+    bl_idname = "object.acn_from_sharp"
     bl_label = "From Sharp Edges"
     bl_description = "Convert sharp edges to bevel weights, add bevel, apply, and set custom normals"
     bl_options = {'REGISTER', 'UNDO'}
@@ -172,9 +270,10 @@ class NDN_OT_from_sharp(Operator):
 
     def execute(self, context):
         obj = context.object
-        props = context.scene.ndn_props
+        props = context.scene.acn_props
 
         ensure_object_mode(context)
+        create_mesh_backup(obj)
 
         bm = bmesh.new()
         bm.from_mesh(obj.data)
@@ -185,31 +284,21 @@ class NDN_OT_from_sharp(Operator):
             self.report({'WARNING'}, "No sharp edges found on this mesh")
             return {'CANCELLED'}
 
-        seams_marked = mark_seams_from_bevel_weight(bm)
-
-        original_face_count = len(bm.faces)
+        mark_seams_from_bevel_weight(bm)
 
         bm.to_mesh(obj.data)
         obj.data.update()
         bm.free()
 
-        bevel_mod = add_bevel_modifier(obj, props.bevel_width, props.bevel_segments)
+        run_workflow(obj, props)
 
-        bpy.ops.object.modifier_apply(modifier=bevel_mod.name)
-
-        select_original_faces(obj, original_face_count)
-
-        set_normals_from_faces(context)
-
-        ensure_object_mode(context)
-
-        self.report({'INFO'}, f"Done! Processed {converted} sharp edges, marked {seams_marked} seams")
+        self.report({'INFO'}, f"Done! Processed {converted} sharp edges")
         return {'FINISHED'}
 
 
-class NDN_OT_from_seams(Operator):
+class ACN_OT_from_seams(Operator):
     """Full workflow starting from seam edges"""
-    bl_idname = "object.ndn_from_seams"
+    bl_idname = "object.acn_from_seams"
     bl_label = "From Seams"
     bl_description = "Convert seam edges to bevel weights, add bevel, apply, and set custom normals"
     bl_options = {'REGISTER', 'UNDO'}
@@ -221,9 +310,10 @@ class NDN_OT_from_seams(Operator):
 
     def execute(self, context):
         obj = context.object
-        props = context.scene.ndn_props
+        props = context.scene.acn_props
 
         ensure_object_mode(context)
+        create_mesh_backup(obj)
 
         bm = bmesh.new()
         bm.from_mesh(obj.data)
@@ -234,29 +324,19 @@ class NDN_OT_from_seams(Operator):
             self.report({'WARNING'}, "No seam edges found on this mesh")
             return {'CANCELLED'}
 
-        original_face_count = len(bm.faces)
-
         bm.to_mesh(obj.data)
         obj.data.update()
         bm.free()
 
-        bevel_mod = add_bevel_modifier(obj, props.bevel_width, props.bevel_segments)
-
-        bpy.ops.object.modifier_apply(modifier=bevel_mod.name)
-
-        select_original_faces(obj, original_face_count)
-
-        set_normals_from_faces(context)
-
-        ensure_object_mode(context)
+        run_workflow(obj, props)
 
         self.report({'INFO'}, f"Done! Processed {converted} seam edges")
         return {'FINISHED'}
 
 
-class NDN_OT_from_bevel_weight(Operator):
+class ACN_OT_from_bevel_weight(Operator):
     """Full workflow starting from existing bevel weights"""
-    bl_idname = "object.ndn_from_bevel_weight"
+    bl_idname = "object.acn_from_bevel_weight"
     bl_label = "From Bevel Weights"
     bl_description = "Use existing bevel weights, add bevel, apply, and set custom normals"
     bl_options = {'REGISTER', 'UNDO'}
@@ -268,7 +348,7 @@ class NDN_OT_from_bevel_weight(Operator):
 
     def execute(self, context):
         obj = context.object
-        props = context.scene.ndn_props
+        props = context.scene.acn_props
 
         ensure_object_mode(context)
 
@@ -287,30 +367,22 @@ class NDN_OT_from_bevel_weight(Operator):
             self.report({'WARNING'}, "No edges with bevel weight found")
             return {'CANCELLED'}
 
-        seams_marked = mark_seams_from_bevel_weight(bm)
-        original_face_count = len(bm.faces)
+        mark_seams_from_bevel_weight(bm)
 
         bm.to_mesh(obj.data)
         obj.data.update()
         bm.free()
 
-        bevel_mod = add_bevel_modifier(obj, props.bevel_width, props.bevel_segments)
+        create_mesh_backup(obj)
+        run_workflow(obj, props)
 
-        bpy.ops.object.modifier_apply(modifier=bevel_mod.name)
-
-        select_original_faces(obj, original_face_count)
-
-        set_normals_from_faces(context)
-
-        ensure_object_mode(context)
-
-        self.report({'INFO'}, f"Done! Processed {weighted_count} weighted edges, marked {seams_marked} seams")
+        self.report({'INFO'}, f"Done! Processed {weighted_count} weighted edges")
         return {'FINISHED'}
 
 
-class NDN_OT_from_auto_sharp(Operator):
+class ACN_OT_from_auto_sharp(Operator):
     """Full workflow with auto-detected sharp edges by angle"""
-    bl_idname = "object.ndn_from_auto_sharp"
+    bl_idname = "object.acn_from_auto_sharp"
     bl_label = "Auto-Detect Sharp"
     bl_description = "Auto-detect sharp edges by angle, convert to bevel weights, add bevel, apply, and set custom normals"
     bl_options = {'REGISTER', 'UNDO'}
@@ -322,9 +394,10 @@ class NDN_OT_from_auto_sharp(Operator):
 
     def execute(self, context):
         obj = context.object
-        props = context.scene.ndn_props
+        props = context.scene.acn_props
 
         ensure_object_mode(context)
+        create_mesh_backup(obj)
 
         bm = bmesh.new()
         bm.from_mesh(obj.data)
@@ -335,30 +408,21 @@ class NDN_OT_from_auto_sharp(Operator):
             self.report({'WARNING'}, "No edges detected above the angle threshold")
             return {'CANCELLED'}
 
-        seams_marked = mark_seams_from_bevel_weight(bm)
-        original_face_count = len(bm.faces)
+        mark_seams_from_bevel_weight(bm)
 
         bm.to_mesh(obj.data)
         obj.data.update()
         bm.free()
 
-        bevel_mod = add_bevel_modifier(obj, props.bevel_width, props.bevel_segments)
+        run_workflow(obj, props)
 
-        bpy.ops.object.modifier_apply(modifier=bevel_mod.name)
-
-        select_original_faces(obj, original_face_count)
-
-        set_normals_from_faces(context)
-
-        ensure_object_mode(context)
-
-        self.report({'INFO'}, f"Done! Auto-detected {converted} sharp edges, marked {seams_marked} seams")
+        self.report({'INFO'}, f"Done! Auto-detected {converted} sharp edges")
         return {'FINISHED'}
 
 
-class NDN_OT_from_existing_bevel(Operator):
+class ACN_OT_from_existing_bevel(Operator):
     """Apply existing bevel modifier and set custom normals"""
-    bl_idname = "object.ndn_from_existing_bevel"
+    bl_idname = "object.acn_from_existing_bevel"
     bl_label = "From Existing Bevel Modifier"
     bl_description = "Apply an existing bevel modifier and set custom normals on original faces"
     bl_options = {'REGISTER', 'UNDO'}
@@ -374,6 +438,7 @@ class NDN_OT_from_existing_bevel(Operator):
         obj = context.object
 
         ensure_object_mode(context)
+        create_mesh_backup(obj)
 
         bevel_mod = None
         for mod in obj.modifiers:
@@ -385,38 +450,81 @@ class NDN_OT_from_existing_bevel(Operator):
             self.report({'WARNING'}, "No bevel modifier found")
             return {'CANCELLED'}
 
-        bm = bmesh.new()
-        bm.from_mesh(obj.data)
-        original_face_count = len(bm.faces)
-
-        layer = get_bevel_weight_layer(bm)
-        mark_seams_from_bevel_weight(bm)
-        bm.to_mesh(obj.data)
-        obj.data.update()
-        bm.free()
+        tag_index = setup_material_tagging(obj)
+        bevel_mod.material = tag_index
 
         bpy.ops.object.modifier_apply(modifier=bevel_mod.name)
 
-        select_original_faces(obj, original_face_count)
+        select_original_faces_by_material(obj, tag_index)
 
-        set_normals_from_faces(context)
+        set_normals_from_faces(bpy.context)
 
-        ensure_object_mode(context)
+        ensure_object_mode(bpy.context)
 
-        self.report({'INFO'}, f"Done! Applied existing bevel modifier and set custom normals")
+        cleanup_tag_material(obj)
+
+        self.report({'INFO'}, "Done! Applied existing bevel and set custom normals")
         return {'FINISHED'}
 
 
-class NDN_PT_main_panel(Panel):
-    bl_label = "Non-Destructive Normals"
-    bl_idname = "NDN_PT_main_panel"
+class ACN_OT_remove(Operator):
+    """Remove custom normals and restore original mesh"""
+    bl_idname = "object.acn_remove"
+    bl_label = "Remove Auto Custom Normals"
+    bl_description = "Restore original mesh from backup, removing bevel geometry and custom normals"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        if obj is None or obj.type != 'MESH' or obj.mode != 'OBJECT':
+            return False
+        return has_backup(obj)
+
+    def execute(self, context):
+        obj = context.object
+
+        ensure_object_mode(context)
+
+        if restore_mesh_backup(obj):
+            self.report({'INFO'}, "Restored original mesh")
+        else:
+            self.report({'WARNING'}, "No backup found to restore")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+class ACN_OT_clear_normals(Operator):
+    """Clear custom normals without restoring geometry"""
+    bl_idname = "object.acn_clear_normals"
+    bl_label = "Clear Custom Normals"
+    bl_description = "Remove custom split normals from the mesh"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        if obj is None or obj.type != 'MESH' or obj.mode != 'OBJECT':
+            return False
+        return obj.data.has_custom_normals
+
+    def execute(self, context):
+        bpy.ops.mesh.customdata_custom_splitnormals_clear()
+        self.report({'INFO'}, "Cleared custom normals")
+        return {'FINISHED'}
+
+
+class ACN_PT_main_panel(Panel):
+    bl_label = "Auto Custom Normals"
+    bl_idname = "ACN_PT_main_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Normals'
+    bl_category = 'Auto Custom Normals'
 
     def draw(self, context):
         layout = self.layout
-        props = context.scene.ndn_props
+        props = context.scene.acn_props
         obj = context.object
 
         if obj is None or obj.type != 'MESH':
@@ -437,23 +545,45 @@ class NDN_PT_main_panel(Panel):
         col = box.column(align=True)
         col.scale_y = 1.3
 
-        col.operator("object.ndn_from_sharp", icon='EDGESEL')
+        col.operator("object.acn_from_sharp", icon='EDGESEL')
 
         col.separator()
-        col.operator("object.ndn_from_seams", icon='UV')
+        col.operator("object.acn_from_seams", icon='UV')
 
         col.separator()
-        col.operator("object.ndn_from_bevel_weight", icon='MOD_BEVEL')
+        col.operator("object.acn_from_bevel_weight", icon='MOD_BEVEL')
 
         col.separator()
-        row = col.row(align=True)
-        row.operator("object.ndn_from_auto_sharp", icon='LIGHT_HEMI')
+        col.operator("object.acn_from_auto_sharp", icon='LIGHT_HEMI')
         col.prop(props, "auto_sharp_angle")
 
         has_bevel_mod = any(mod.type == 'BEVEL' for mod in obj.modifiers)
         if has_bevel_mod:
             col.separator()
-            col.operator("object.ndn_from_existing_bevel", icon='CHECKMARK')
+            col.operator("object.acn_from_existing_bevel", icon='CHECKMARK')
+
+        layout.separator()
+
+        box = layout.box()
+        box.label(text="Toggle / Restore", icon='FILE_REFRESH')
+        col = box.column(align=True)
+        col.scale_y = 1.3
+
+        backup_exists = has_backup(obj)
+        row = col.row(align=True)
+        row.enabled = backup_exists
+        row.operator("object.acn_remove", icon='LOOP_BACK', text="Restore Original Mesh")
+
+        col.separator()
+
+        row = col.row(align=True)
+        row.enabled = obj.data.has_custom_normals
+        row.operator("object.acn_clear_normals", icon='X', text="Clear Custom Normals Only")
+
+        if backup_exists:
+            col.label(text="Backup available", icon='CHECKMARK')
+        else:
+            col.label(text="No backup (run a workflow first)", icon='INFO')
 
         layout.separator()
 
@@ -480,24 +610,26 @@ class NDN_PT_main_panel(Panel):
 
 
 classes = (
-    NDN_Properties,
-    NDN_OT_from_sharp,
-    NDN_OT_from_seams,
-    NDN_OT_from_bevel_weight,
-    NDN_OT_from_auto_sharp,
-    NDN_OT_from_existing_bevel,
-    NDN_PT_main_panel,
+    ACN_Properties,
+    ACN_OT_from_sharp,
+    ACN_OT_from_seams,
+    ACN_OT_from_bevel_weight,
+    ACN_OT_from_auto_sharp,
+    ACN_OT_from_existing_bevel,
+    ACN_OT_remove,
+    ACN_OT_clear_normals,
+    ACN_PT_main_panel,
 )
 
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.ndn_props = bpy.props.PointerProperty(type=NDN_Properties)
+    bpy.types.Scene.acn_props = bpy.props.PointerProperty(type=ACN_Properties)
 
 
 def unregister():
-    del bpy.types.Scene.ndn_props
+    del bpy.types.Scene.acn_props
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
