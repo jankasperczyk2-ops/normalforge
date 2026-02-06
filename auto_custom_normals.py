@@ -183,6 +183,18 @@ def select_original_faces_by_material(obj, tag_material_index):
     return selected
 
 
+def ensure_smooth_shading(obj):
+    ensure_object_mode(bpy.context)
+    mesh = obj.data
+
+    for poly in mesh.polygons:
+        poly.use_smooth = True
+
+    if hasattr(mesh, 'use_auto_smooth'):
+        mesh.use_auto_smooth = True
+        mesh.auto_smooth_angle = 3.14159
+
+
 def set_normals_from_faces(context):
     ensure_edit_mode(context)
     try:
@@ -238,6 +250,8 @@ def restore_mesh_backup(obj):
 
 
 def run_workflow(obj, props):
+    ensure_smooth_shading(obj)
+
     tag_index, tag_name = create_unique_tag_material(obj)
 
     bevel_mod = add_bevel_modifier(obj, props.bevel_width, props.bevel_segments, tag_index)
@@ -448,6 +462,8 @@ class ACN_OT_from_existing_bevel(Operator):
         if bevel_mod is None:
             self.report({'WARNING'}, "No bevel modifier found")
             return {'CANCELLED'}
+
+        ensure_smooth_shading(obj)
 
         tag_index, tag_name = create_unique_tag_material(obj)
         bevel_mod.material = tag_index
