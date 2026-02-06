@@ -91,21 +91,9 @@ def auto_sharp_to_bevel_weight(bm, angle_threshold):
             face_angle = edge.link_faces[0].normal.angle(edge.link_faces[1].normal)
             if face_angle > angle_threshold:
                 edge[layer] = 1.0
-                edge.smooth = False
                 count += 1
         elif len(edge.link_faces) == 1:
             edge[layer] = 1.0
-            edge.smooth = False
-            count += 1
-    return count
-
-
-def mark_seams_from_bevel_weight(bm):
-    layer = get_bevel_weight_layer(bm)
-    count = 0
-    for edge in bm.edges:
-        if edge[layer] > 0.0:
-            edge.seam = True
             count += 1
     return count
 
@@ -296,8 +284,6 @@ class ACN_OT_from_sharp(Operator):
             self.report({'WARNING'}, "No sharp edges found on this mesh")
             return {'CANCELLED'}
 
-        mark_seams_from_bevel_weight(bm)
-
         bm.to_mesh(obj.data)
         obj.data.update()
         bm.free()
@@ -380,8 +366,6 @@ class ACN_OT_from_bevel_weight(Operator):
             self.report({'WARNING'}, "No edges with bevel weight found")
             return {'CANCELLED'}
 
-        mark_seams_from_bevel_weight(bm)
-
         bm.to_mesh(obj.data)
         obj.data.update()
         bm.free()
@@ -419,8 +403,6 @@ class ACN_OT_from_auto_sharp(Operator):
             bm.free()
             self.report({'WARNING'}, "No edges detected above the angle threshold")
             return {'CANCELLED'}
-
-        mark_seams_from_bevel_weight(bm)
 
         bm.to_mesh(obj.data)
         obj.data.update()
