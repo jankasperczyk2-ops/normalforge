@@ -14,7 +14,7 @@ Auto Custom Normals automates the entire pipeline in a single click:
 3. Marks seams at the same locations
 4. Adds a bevel modifier using those weights
 5. Applies the bevel
-6. Selects only the original flat faces (not the new bevel geometry)
+6. Selects only the original flat faces (not the new bevel geometry) using material tagging
 7. Sets custom normals from face on those selected areas
 
 Plus a **Restore** button lets you go back to the original mesh at any time.
@@ -40,7 +40,7 @@ Plus a **Restore** button lets you go back to the original mesh at any time.
 
 ## Installation
 
-1. Download \`non_destructive_normals.py\`
+1. Download \`auto_custom_normals.py\`
 2. In Blender: Edit > Preferences > Add-ons > Install
 3. Select the downloaded file and enable the add-on
 4. Find the panel in View3D > Sidebar (N) > Auto Custom Normals tab
