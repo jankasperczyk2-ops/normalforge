@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Auto Custom Normals",
     "author": "Your Name",
-    "version": (2, 0, 0),
+    "version": (2, 1, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Auto Custom Normals",
     "description": "One-click bevel + custom normals workflow for game-ready meshes",
@@ -11,10 +11,12 @@ bl_info = {
 import bpy
 import bmesh
 import uuid
+import math
 from bpy.types import Operator, Panel, PropertyGroup
 from bpy.props import FloatProperty, IntProperty
 
 ACN_BACKUP_KEY = "acn_backup_mesh"
+DEFAULT_ANGLE = 0.523599
 
 
 class ACN_Properties(PropertyGroup):
@@ -63,27 +65,7 @@ def get_bevel_weight_layer(bm):
     return layer
 
 
-def sharp_edges_to_bevel_weight(bm):
-    layer = get_bevel_weight_layer(bm)
-    count = 0
-    for edge in bm.edges:
-        if not edge.smooth:
-            edge[layer] = 1.0
-            count += 1
-    return count
-
-
-def seams_to_bevel_weight(bm):
-    layer = get_bevel_weight_layer(bm)
-    count = 0
-    for edge in bm.edges:
-        if edge.seam:
-            edge[layer] = 1.0
-            count += 1
-    return count
-
-
-def auto_sharp_to_bevel_weight(bm, angle_threshold):
+def edges_by_angle(bm, angle_threshold):
     layer = get_bevel_weight_layer(bm)
     count = 0
     for edge in bm.edges:
@@ -95,6 +77,49 @@ def auto_sharp_to_bevel_weight(bm, angle_threshold):
         elif len(edge.link_faces) == 1:
             edge[layer] = 1.0
             count += 1
+    return count
+
+
+def prepare_bevel_weights(obj, source, angle_threshold=DEFAULT_ANGLE):
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    layer = get_bevel_weight_layer(bm)
+
+    for edge in bm.edges:
+        edge[layer] = 0.0
+
+    count = 0
+
+    if source == 'SHARP':
+        for edge in bm.edges:
+            if not edge.smooth:
+                edge[layer] = 1.0
+                count += 1
+        if count == 0:
+            count = edges_by_angle(bm, angle_threshold)
+
+    elif source == 'SEAMS':
+        for edge in bm.edges:
+            if edge.seam:
+                edge[layer] = 1.0
+                count += 1
+        if count == 0:
+            count = edges_by_angle(bm, angle_threshold)
+
+    elif source == 'BEVEL_WEIGHT':
+        for edge in bm.edges:
+            if edge[layer] > 0.0:
+                count += 1
+        if count == 0:
+            count = edges_by_angle(bm, angle_threshold)
+
+    elif source == 'ANGLE':
+        count = edges_by_angle(bm, angle_threshold)
+
+    bm.to_mesh(obj.data)
+    obj.data.update()
+    bm.free()
+
     return count
 
 
@@ -258,7 +283,7 @@ def run_workflow(obj, props):
 
 
 class ACN_OT_from_sharp(Operator):
-    """Full workflow starting from sharp edges"""
+    """Convert sharp edges to bevel weights, add bevel, apply, and set custom normals. Falls back to angle detection if no sharp edges exist."""
     bl_idname = "object.acn_from_sharp"
     bl_label = "From Sharp Edges"
     bl_description = "Convert sharp edges to bevel weights, add bevel, apply, and set custom normals"
@@ -275,28 +300,20 @@ class ACN_OT_from_sharp(Operator):
 
         ensure_object_mode(context)
 
-        bm = bmesh.new()
-        bm.from_mesh(obj.data)
-
-        converted = sharp_edges_to_bevel_weight(bm)
-        if converted == 0:
-            bm.free()
-            self.report({'WARNING'}, "No sharp edges found on this mesh")
+        count = prepare_bevel_weights(obj, 'SHARP', props.auto_sharp_angle)
+        if count == 0:
+            self.report({'WARNING'}, "No edges found to process")
             return {'CANCELLED'}
-
-        bm.to_mesh(obj.data)
-        obj.data.update()
-        bm.free()
 
         create_mesh_backup(obj)
         run_workflow(obj, props)
 
-        self.report({'INFO'}, f"Done! Processed {converted} sharp edges")
+        self.report({'INFO'}, f"Done! Processed {count} edges")
         return {'FINISHED'}
 
 
 class ACN_OT_from_seams(Operator):
-    """Full workflow starting from seam edges"""
+    """Convert seam edges to bevel weights, add bevel, apply, and set custom normals. Falls back to angle detection if no seams exist."""
     bl_idname = "object.acn_from_seams"
     bl_label = "From Seams"
     bl_description = "Convert seam edges to bevel weights, add bevel, apply, and set custom normals"
@@ -313,28 +330,20 @@ class ACN_OT_from_seams(Operator):
 
         ensure_object_mode(context)
 
-        bm = bmesh.new()
-        bm.from_mesh(obj.data)
-
-        converted = seams_to_bevel_weight(bm)
-        if converted == 0:
-            bm.free()
-            self.report({'WARNING'}, "No seam edges found on this mesh")
+        count = prepare_bevel_weights(obj, 'SEAMS', props.auto_sharp_angle)
+        if count == 0:
+            self.report({'WARNING'}, "No edges found to process")
             return {'CANCELLED'}
-
-        bm.to_mesh(obj.data)
-        obj.data.update()
-        bm.free()
 
         create_mesh_backup(obj)
         run_workflow(obj, props)
 
-        self.report({'INFO'}, f"Done! Processed {converted} seam edges")
+        self.report({'INFO'}, f"Done! Processed {count} edges")
         return {'FINISHED'}
 
 
 class ACN_OT_from_bevel_weight(Operator):
-    """Full workflow starting from existing bevel weights"""
+    """Use existing bevel weights, add bevel, apply, and set custom normals. Falls back to angle detection if no weights exist."""
     bl_idname = "object.acn_from_bevel_weight"
     bl_label = "From Bevel Weights"
     bl_description = "Use existing bevel weights, add bevel, apply, and set custom normals"
@@ -351,37 +360,23 @@ class ACN_OT_from_bevel_weight(Operator):
 
         ensure_object_mode(context)
 
-        bm = bmesh.new()
-        bm.from_mesh(obj.data)
-
-        layer = bm.edges.layers.float.get("bevel_weight_edge")
-        if layer is None:
-            bm.free()
-            self.report({'WARNING'}, "No bevel weight data found on this mesh")
+        count = prepare_bevel_weights(obj, 'BEVEL_WEIGHT', props.auto_sharp_angle)
+        if count == 0:
+            self.report({'WARNING'}, "No edges found to process")
             return {'CANCELLED'}
-
-        weighted_count = sum(1 for e in bm.edges if e[layer] > 0.0)
-        if weighted_count == 0:
-            bm.free()
-            self.report({'WARNING'}, "No edges with bevel weight found")
-            return {'CANCELLED'}
-
-        bm.to_mesh(obj.data)
-        obj.data.update()
-        bm.free()
 
         create_mesh_backup(obj)
         run_workflow(obj, props)
 
-        self.report({'INFO'}, f"Done! Processed {weighted_count} weighted edges")
+        self.report({'INFO'}, f"Done! Processed {count} edges")
         return {'FINISHED'}
 
 
 class ACN_OT_from_auto_sharp(Operator):
-    """Full workflow with auto-detected sharp edges by angle"""
+    """Auto-detect edges by angle threshold, convert to bevel weights, add bevel, apply, and set custom normals"""
     bl_idname = "object.acn_from_auto_sharp"
-    bl_label = "Auto-Detect Sharp"
-    bl_description = "Auto-detect sharp edges by angle, convert to bevel weights, add bevel, apply, and set custom normals"
+    bl_label = "Auto-Detect by Angle"
+    bl_description = "Auto-detect edges by angle, convert to bevel weights, add bevel, apply, and set custom normals"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -395,23 +390,15 @@ class ACN_OT_from_auto_sharp(Operator):
 
         ensure_object_mode(context)
 
-        bm = bmesh.new()
-        bm.from_mesh(obj.data)
-
-        converted = auto_sharp_to_bevel_weight(bm, props.auto_sharp_angle)
-        if converted == 0:
-            bm.free()
+        count = prepare_bevel_weights(obj, 'ANGLE', props.auto_sharp_angle)
+        if count == 0:
             self.report({'WARNING'}, "No edges detected above the angle threshold")
             return {'CANCELLED'}
-
-        bm.to_mesh(obj.data)
-        obj.data.update()
-        bm.free()
 
         create_mesh_backup(obj)
         run_workflow(obj, props)
 
-        self.report({'INFO'}, f"Done! Auto-detected {converted} sharp edges")
+        self.report({'INFO'}, f"Done! Processed {count} edges")
         return {'FINISHED'}
 
 
