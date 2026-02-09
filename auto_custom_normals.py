@@ -140,12 +140,12 @@ class ACN_Properties(PropertyGroup):
         name="Face Strength",
         description="Whether to set face strength and which faces to set it on",
         items=[
-            ('NONE', "None", "Do not set face strength"),
-            ('NEW', "New", "Set face strength on new faces only"),
-            ('AFFECTED', "Affected", "Set face strength on new and affected faces"),
-            ('ALL', "All", "Set face strength on all faces"),
+            ('FSTR_NONE', "None", "Do not set face strength"),
+            ('FSTR_NEW', "New", "Set face strength on new faces only"),
+            ('FSTR_AFFECTED', "Affected", "Set face strength on new and affected faces"),
+            ('FSTR_ALL', "All", "Set face strength on all faces"),
         ],
-        default='NONE',
+        default='FSTR_NONE',
     )
 
     auto_sharp_angle: FloatProperty(
