@@ -99,21 +99,21 @@ class ACN_Properties(PropertyGroup):
         name="Outer Miter",
         description="Pattern to use for outside of miters",
         items=[
-            ('SHARP', "Sharp", "Outside of miter is sharp"),
-            ('PATCH', "Patch", "Outside of miter is a patch"),
-            ('ARC', "Arc", "Outside of miter is an arc"),
+            ('MITER_SHARP', "Sharp", "Outside of miter is sharp"),
+            ('MITER_PATCH', "Patch", "Outside of miter is a patch"),
+            ('MITER_ARC', "Arc", "Outside of miter is an arc"),
         ],
-        default='SHARP',
+        default='MITER_SHARP',
     )
 
     bevel_miter_inner: EnumProperty(
         name="Inner Miter",
         description="Pattern to use for inside of miters",
         items=[
-            ('SHARP', "Sharp", "Inside of miter is sharp"),
-            ('ARC', "Arc", "Inside of miter is an arc"),
+            ('MITER_SHARP', "Sharp", "Inside of miter is sharp"),
+            ('MITER_ARC', "Arc", "Inside of miter is an arc"),
         ],
-        default='SHARP',
+        default='MITER_SHARP',
     )
 
     bevel_spread: FloatProperty(
@@ -612,7 +612,7 @@ class ACN_PT_main_panel(Panel):
         col.separator()
         col.prop(props, "bevel_miter_outer")
         col.prop(props, "bevel_miter_inner")
-        if props.bevel_miter_inner == 'ARC':
+        if props.bevel_miter_inner == 'MITER_ARC':
             col.prop(props, "bevel_spread")
 
         col.separator()
