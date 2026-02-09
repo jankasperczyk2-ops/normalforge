@@ -124,6 +124,10 @@ def prepare_bevel_weights(obj, source, angle_threshold=DEFAULT_ANGLE):
 
 
 def create_unique_tag_material(obj):
+    if len(obj.data.materials) == 0:
+        default_mat = bpy.data.materials.new(name="_ACN_Default")
+        obj.data.materials.append(default_mat)
+
     tag_name = "_ACN_Tag_" + uuid.uuid4().hex[:8]
     mat = bpy.data.materials.new(name=tag_name)
     mat.diffuse_color = (1.0, 0.0, 1.0, 0.5)
@@ -159,6 +163,31 @@ def cleanup_tag_material(obj, tag_name):
     mat = bpy.data.materials.get(tag_name)
     if mat:
         bpy.data.materials.remove(mat)
+
+    default_mat_index = None
+    for i, slot in enumerate(obj.material_slots):
+        if slot.material and slot.material.name == "_ACN_Default":
+            default_mat_index = i
+            break
+
+    if default_mat_index is not None:
+        default_mat = bpy.data.materials.get("_ACN_Default")
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        for face in bm.faces:
+            if face.material_index == default_mat_index:
+                face.material_index = 0
+            elif face.material_index > default_mat_index:
+                face.material_index -= 1
+        bm.to_mesh(obj.data)
+        obj.data.update()
+        bm.free()
+
+        obj.active_material_index = default_mat_index
+        bpy.ops.object.material_slot_remove()
+
+        if default_mat:
+            bpy.data.materials.remove(default_mat)
 
 
 def add_bevel_modifier(obj, width, segments, tag_material_index):
