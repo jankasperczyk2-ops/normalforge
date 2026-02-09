@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Auto Custom Normals",
     "author": "Your Name",
-    "version": (2, 1, 0),
+    "version": (3, 0, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Auto Custom Normals",
     "description": "One-click bevel + custom normals workflow for game-ready meshes",
@@ -13,7 +13,7 @@ import bmesh
 import uuid
 import math
 from bpy.types import Operator, Panel, PropertyGroup
-from bpy.props import FloatProperty, IntProperty
+from bpy.props import FloatProperty, IntProperty, EnumProperty, BoolProperty
 
 ACN_BACKUP_KEY = "acn_backup_mesh"
 DEFAULT_ANGLE = 0.523599
@@ -21,11 +21,11 @@ DEFAULT_ANGLE = 0.523599
 
 class ACN_Properties(PropertyGroup):
     bevel_width: FloatProperty(
-        name="Bevel Width",
+        name="Width",
         description="Width of the bevel",
         default=0.02,
-        min=0.001,
-        max=10.0,
+        min=0.0001,
+        max=100.0,
         step=1,
         precision=4,
     )
@@ -35,11 +35,121 @@ class ACN_Properties(PropertyGroup):
         description="Number of bevel segments",
         default=1,
         min=1,
-        max=10,
+        max=100,
+    )
+
+    bevel_profile: FloatProperty(
+        name="Profile",
+        description="Profile shape (0.5 = round)",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        step=1,
+        precision=2,
+    )
+
+    bevel_affect: EnumProperty(
+        name="Affect",
+        description="What geometry to bevel",
+        items=[
+            ('EDGES', "Edges", "Bevel edges"),
+            ('VERTICES', "Vertices", "Bevel vertices"),
+        ],
+        default='EDGES',
+    )
+
+    bevel_offset_type: EnumProperty(
+        name="Width Type",
+        description="Method for determining bevel width",
+        items=[
+            ('OFFSET', "Offset", "Amount is offset of new edges from original"),
+            ('WIDTH', "Width", "Amount is width of new faces"),
+            ('DEPTH', "Depth", "Amount is perpendicular distance from original edge to bevel face"),
+            ('PERCENT', "Percent", "Amount is percent of adjacent edge length"),
+            ('ABSOLUTE', "Absolute", "Amount is absolute distance along adjacent edge"),
+        ],
+        default='OFFSET',
+    )
+
+    bevel_clamp_overlap: BoolProperty(
+        name="Clamp Overlap",
+        description="Clamp the width to avoid overlap",
+        default=False,
+    )
+
+    bevel_loop_slide: BoolProperty(
+        name="Loop Slide",
+        description="Prefer sliding along edges to having even widths",
+        default=True,
+    )
+
+    bevel_mark_seam: BoolProperty(
+        name="Mark Seam",
+        description="Mark seam edges on bevel faces",
+        default=False,
+    )
+
+    bevel_mark_sharp: BoolProperty(
+        name="Mark Sharp",
+        description="Mark sharp edges on bevel faces",
+        default=False,
+    )
+
+    bevel_miter_outer: EnumProperty(
+        name="Outer Miter",
+        description="Pattern to use for outside of miters",
+        items=[
+            ('SHARP', "Sharp", "Outside of miter is sharp"),
+            ('PATCH', "Patch", "Outside of miter is a patch"),
+            ('ARC', "Arc", "Outside of miter is an arc"),
+        ],
+        default='SHARP',
+    )
+
+    bevel_miter_inner: EnumProperty(
+        name="Inner Miter",
+        description="Pattern to use for inside of miters",
+        items=[
+            ('SHARP', "Sharp", "Inside of miter is sharp"),
+            ('ARC', "Arc", "Inside of miter is an arc"),
+        ],
+        default='SHARP',
+    )
+
+    bevel_spread: FloatProperty(
+        name="Spread",
+        description="Amount to spread arcs for inner miters",
+        default=0.1,
+        min=0.0,
+        max=1.0,
+        step=1,
+        precision=3,
+    )
+
+    bevel_vmesh_method: EnumProperty(
+        name="Intersection Method",
+        description="Method for handling vertex mesh intersections",
+        items=[
+            ('ADJ', "Grid Fill", "Default grid fill method"),
+            ('CUTOFF', "Cutoff", "Cut off faces at intersection"),
+        ],
+        default='ADJ',
+    )
+
+    bevel_face_strength_mode: EnumProperty(
+        name="Face Strength",
+        description="Whether to set face strength and which faces to set it on",
+        items=[
+            ('NONE', "None", "Do not set face strength"),
+            ('NEW', "New", "Set face strength on new faces only"),
+            ('AFFECTED', "Affected", "Set face strength on new and affected faces"),
+            ('ALL', "All", "Set face strength on all faces"),
+        ],
+        default='NONE',
     )
 
     auto_sharp_angle: FloatProperty(
-        name="Auto Sharp Angle",
+        name="Sharp Angle",
         description="Angle threshold for auto-detecting sharp edges",
         default=0.523599,
         min=0.0,
@@ -85,28 +195,9 @@ def prepare_bevel_weights(obj, source, angle_threshold=DEFAULT_ANGLE):
     bm.from_mesh(obj.data)
     layer = get_bevel_weight_layer(bm)
 
-    for edge in bm.edges:
-        edge[layer] = 0.0
-
     count = 0
 
-    if source == 'SHARP':
-        for edge in bm.edges:
-            if not edge.smooth:
-                edge[layer] = 1.0
-                count += 1
-        if count == 0:
-            count = edges_by_angle(bm, angle_threshold)
-
-    elif source == 'SEAMS':
-        for edge in bm.edges:
-            if edge.seam:
-                edge[layer] = 1.0
-                count += 1
-        if count == 0:
-            count = edges_by_angle(bm, angle_threshold)
-
-    elif source == 'BEVEL_WEIGHT':
+    if source == 'BEVEL_WEIGHT':
         for edge in bm.edges:
             if edge[layer] > 0.0:
                 count += 1
@@ -114,6 +205,8 @@ def prepare_bevel_weights(obj, source, angle_threshold=DEFAULT_ANGLE):
             count = edges_by_angle(bm, angle_threshold)
 
     elif source == 'ANGLE':
+        for edge in bm.edges:
+            edge[layer] = 0.0
         count = edges_by_angle(bm, angle_threshold)
 
     bm.to_mesh(obj.data)
@@ -190,12 +283,23 @@ def cleanup_tag_material(obj, tag_name):
             bpy.data.materials.remove(default_mat)
 
 
-def add_bevel_modifier(obj, width, segments, tag_material_index):
+def add_bevel_modifier(obj, props, tag_material_index):
     bevel_mod = obj.modifiers.new(name="ACN_Bevel", type='BEVEL')
     bevel_mod.limit_method = 'WEIGHT'
-    bevel_mod.width = width
-    bevel_mod.segments = segments
-    bevel_mod.affect = 'EDGES'
+    bevel_mod.width = props.bevel_width
+    bevel_mod.segments = props.bevel_segments
+    bevel_mod.profile = props.bevel_profile
+    bevel_mod.affect = props.bevel_affect
+    bevel_mod.offset_type = props.bevel_offset_type
+    bevel_mod.use_clamp_overlap = props.bevel_clamp_overlap
+    bevel_mod.loop_slide = props.bevel_loop_slide
+    bevel_mod.mark_seam = props.bevel_mark_seam
+    bevel_mod.mark_sharp = props.bevel_mark_sharp
+    bevel_mod.miter_outer = props.bevel_miter_outer
+    bevel_mod.miter_inner = props.bevel_miter_inner
+    bevel_mod.spread = props.bevel_spread
+    bevel_mod.vmesh_method = props.bevel_vmesh_method
+    bevel_mod.face_strength_mode = props.bevel_face_strength_mode
     bevel_mod.harden_normals = False
     bevel_mod.material = tag_material_index
     return bevel_mod
@@ -296,7 +400,7 @@ def run_workflow(obj, props):
 
     tag_index, tag_name = create_unique_tag_material(obj)
 
-    bevel_mod = add_bevel_modifier(obj, props.bevel_width, props.bevel_segments, tag_index)
+    bevel_mod = add_bevel_modifier(obj, props, tag_index)
 
     bpy.ops.object.modifier_apply(modifier=bevel_mod.name)
 
@@ -309,66 +413,6 @@ def run_workflow(obj, props):
     cleanup_tag_material(obj, tag_name)
 
     return selected
-
-
-class ACN_OT_from_sharp(Operator):
-    """Convert sharp edges to bevel weights, add bevel, apply, and set custom normals. Falls back to angle detection if no sharp edges exist."""
-    bl_idname = "object.acn_from_sharp"
-    bl_label = "From Sharp Edges"
-    bl_description = "Convert sharp edges to bevel weights, add bevel, apply, and set custom normals"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.object
-        return obj is not None and obj.type == 'MESH' and obj.mode == 'OBJECT'
-
-    def execute(self, context):
-        obj = context.object
-        props = context.scene.acn_props
-
-        ensure_object_mode(context)
-
-        count = prepare_bevel_weights(obj, 'SHARP', props.auto_sharp_angle)
-        if count == 0:
-            self.report({'WARNING'}, "No edges found to process")
-            return {'CANCELLED'}
-
-        create_mesh_backup(obj)
-        run_workflow(obj, props)
-
-        self.report({'INFO'}, f"Done! Processed {count} edges")
-        return {'FINISHED'}
-
-
-class ACN_OT_from_seams(Operator):
-    """Convert seam edges to bevel weights, add bevel, apply, and set custom normals. Falls back to angle detection if no seams exist."""
-    bl_idname = "object.acn_from_seams"
-    bl_label = "From Seams"
-    bl_description = "Convert seam edges to bevel weights, add bevel, apply, and set custom normals"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.object
-        return obj is not None and obj.type == 'MESH' and obj.mode == 'OBJECT'
-
-    def execute(self, context):
-        obj = context.object
-        props = context.scene.acn_props
-
-        ensure_object_mode(context)
-
-        count = prepare_bevel_weights(obj, 'SEAMS', props.auto_sharp_angle)
-        if count == 0:
-            self.report({'WARNING'}, "No edges found to process")
-            return {'CANCELLED'}
-
-        create_mesh_backup(obj)
-        run_workflow(obj, props)
-
-        self.report({'INFO'}, f"Done! Processed {count} edges")
-        return {'FINISHED'}
 
 
 class ACN_OT_from_bevel_weight(Operator):
@@ -542,30 +586,52 @@ class ACN_PT_main_panel(Panel):
             return
 
         box = layout.box()
-        box.label(text="Bevel Settings", icon='PREFERENCES')
+        box.label(text="Bevel Settings", icon='MOD_BEVEL')
+
         col = box.column(align=True)
         col.prop(props, "bevel_width")
         col.prop(props, "bevel_segments")
+        col.prop(props, "bevel_profile", slider=True)
+
+        col.separator()
+        col.prop(props, "bevel_affect")
+        col.prop(props, "bevel_offset_type")
+
+        col.separator()
+        row = col.row(align=True)
+        row.prop(props, "bevel_clamp_overlap")
+        row = col.row(align=True)
+        row.prop(props, "bevel_loop_slide")
+
+        col.separator()
+        row = col.row(align=True)
+        row.prop(props, "bevel_mark_seam")
+        row = col.row(align=True)
+        row.prop(props, "bevel_mark_sharp")
+
+        col.separator()
+        col.prop(props, "bevel_miter_outer")
+        col.prop(props, "bevel_miter_inner")
+        if props.bevel_miter_inner == 'ARC':
+            col.prop(props, "bevel_spread")
+
+        col.separator()
+        col.prop(props, "bevel_vmesh_method")
+        col.prop(props, "bevel_face_strength_mode")
 
         layout.separator()
 
         box = layout.box()
-        box.label(text="One-Click Workflows", icon='PLAY')
+        box.label(text="Workflows", icon='PLAY')
 
         col = box.column(align=True)
         col.scale_y = 1.3
 
-        col.operator("object.acn_from_sharp", icon='EDGESEL')
-
-        col.separator()
-        col.operator("object.acn_from_seams", icon='UV')
+        col.operator("object.acn_from_auto_sharp", icon='LIGHT_HEMI')
+        col.prop(props, "auto_sharp_angle")
 
         col.separator()
         col.operator("object.acn_from_bevel_weight", icon='MOD_BEVEL')
-
-        col.separator()
-        col.operator("object.acn_from_auto_sharp", icon='LIGHT_HEMI')
-        col.prop(props, "auto_sharp_angle")
 
         has_bevel_mod = any(mod.type == 'BEVEL' for mod in obj.modifiers)
         if has_bevel_mod:
@@ -621,8 +687,6 @@ class ACN_PT_main_panel(Panel):
 
 classes = (
     ACN_Properties,
-    ACN_OT_from_sharp,
-    ACN_OT_from_seams,
     ACN_OT_from_bevel_weight,
     ACN_OT_from_auto_sharp,
     ACN_OT_from_existing_bevel,
