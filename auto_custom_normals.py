@@ -395,6 +395,38 @@ def restore_mesh_backup(obj):
     return True
 
 
+def fix_bevel_ngons(obj, tag_material_index):
+    ensure_edit_mode(bpy.context)
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+
+    for v in bm.verts:
+        v.select = False
+    for e in bm.edges:
+        e.select = False
+    for f in bm.faces:
+        f.select = False
+
+    ngon_count = 0
+    for face in bm.faces:
+        if face.material_index == tag_material_index and len(face.verts) > 4:
+            face.select = True
+            ngon_count += 1
+
+    bmesh.update_edit_mesh(obj.data)
+
+    if ngon_count > 0:
+        bpy.ops.mesh.quads_convert_to_tris(quad_method='BEAUTY', ngon_method='BEAUTY')
+        bpy.ops.mesh.tris_convert_to_quads(
+            face_threshold=0.698132,
+            shape_threshold=0.698132,
+        )
+
+    return ngon_count
+
+
 def run_workflow(obj, props):
     ensure_smooth_shading(obj)
 
@@ -403,6 +435,8 @@ def run_workflow(obj, props):
     bevel_mod = add_bevel_modifier(obj, props, tag_index)
 
     bpy.ops.object.modifier_apply(modifier=bevel_mod.name)
+
+    fix_bevel_ngons(obj, tag_index)
 
     selected = select_original_faces_by_material(obj, tag_index)
 
