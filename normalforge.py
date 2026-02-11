@@ -157,6 +157,16 @@ class NF_Properties(PropertyGroup):
         subtype='ANGLE',
     )
 
+    detect_ratio: FloatProperty(
+        name="Detection Ratio",
+        description="Faces with area below this ratio of the median area are considered bevel faces",
+        default=0.5,
+        min=0.01,
+        max=1.0,
+        step=1,
+        precision=2,
+    )
+
 
 def ensure_object_mode(context):
     if context.object and context.object.mode != 'OBJECT':
@@ -555,6 +565,122 @@ class NF_OT_from_existing_bevel(Operator):
         return {'FINISHED'}
 
 
+def detect_bevel_faces(obj, ratio_threshold):
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+
+    areas = sorted([f.calc_area() for f in bm.faces])
+    if not areas:
+        bm.free()
+        return (0, set())
+
+    median_area = areas[len(areas) // 2]
+    cutoff = median_area * ratio_threshold
+
+    bevel_count = 0
+    original_indices = set()
+    for face in bm.faces:
+        if face.calc_area() >= cutoff:
+            original_indices.add(face.index)
+        else:
+            bevel_count += 1
+
+    bm.free()
+    return bevel_count, original_indices
+
+
+def select_faces_by_indices(obj, face_indices):
+    ensure_edit_mode(bpy.context)
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+
+    for v in bm.verts:
+        v.select = False
+    for e in bm.edges:
+        e.select = False
+    for f in bm.faces:
+        f.select = False
+
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+
+    selected = 0
+    for face in bm.faces:
+        if face.index in face_indices:
+            face.select = True
+            selected += 1
+
+    bmesh.update_edit_mesh(obj.data)
+    return selected
+
+
+class NF_OT_from_geometry(Operator):
+    """Detect bevel faces on already-beveled geometry by face area and set custom normals on the original larger faces"""
+    bl_idname = "object.nf_from_geometry"
+    bl_label = "From Existing Geometry"
+    bl_description = "Auto-detect bevel faces by size and set custom normals on the original faces"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        return obj is not None and obj.type == 'MESH' and obj.mode == 'OBJECT'
+
+    def execute(self, context):
+        obj = context.object
+        props = context.scene.nf_props
+
+        ensure_object_mode(context)
+
+        result = detect_bevel_faces(obj, props.detect_ratio)
+        if result[0] == 0:
+            self.report({'WARNING'}, "No bevel faces detected — try adjusting the detection ratio")
+            return {'CANCELLED'}
+
+        bevel_count, original_indices = result
+
+        create_mesh_backup(obj)
+        ensure_smooth_shading(obj)
+
+        select_faces_by_indices(obj, original_indices)
+        set_normals_from_faces(bpy.context)
+        ensure_object_mode(bpy.context)
+
+        self.report({'INFO'}, f"Done! Detected {bevel_count} bevel faces, set normals on {len(original_indices)} original faces")
+        return {'FINISHED'}
+
+
+class NF_OT_restore_by_name(Operator):
+    """Restore a specific object's backup mesh"""
+    bl_idname = "object.nf_restore_by_name"
+    bl_label = "Restore"
+    bl_description = "Restore this object's original mesh from backup"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    obj_name: bpy.props.StringProperty()
+
+    def execute(self, context):
+        obj = bpy.data.objects.get(self.obj_name)
+        if obj is None:
+            self.report({'WARNING'}, f"Object '{self.obj_name}' not found")
+            return {'CANCELLED'}
+
+        old_active = context.view_layer.objects.active
+        context.view_layer.objects.active = obj
+
+        ensure_object_mode(context)
+
+        if restore_mesh_backup(obj):
+            self.report({'INFO'}, f"Restored original mesh for '{self.obj_name}'")
+        else:
+            self.report({'WARNING'}, f"No backup found for '{self.obj_name}'")
+            context.view_layer.objects.active = old_active
+            return {'CANCELLED'}
+
+        context.view_layer.objects.active = old_active
+        return {'FINISHED'}
+
+
 class NF_OT_remove(Operator):
     """Remove custom normals and restore original mesh"""
     bl_idname = "object.nf_remove"
@@ -672,6 +798,10 @@ class NF_PT_main_panel(Panel):
             col.separator()
             col.operator("object.nf_from_existing_bevel", icon='CHECKMARK')
 
+        col.separator()
+        col.operator("object.nf_from_geometry", icon='MESH_DATA')
+        col.prop(props, "detect_ratio")
+
         layout.separator()
 
         box = layout.box()
@@ -694,6 +824,25 @@ class NF_PT_main_panel(Panel):
             col.label(text="Backup available", icon='CHECKMARK')
         else:
             col.label(text="No backup (run a workflow first)", icon='INFO')
+
+        layout.separator()
+
+        backed_up_objects = []
+        for o in bpy.data.objects:
+            if o.type == 'MESH' and has_backup(o):
+                backed_up_objects.append(o)
+
+        box = layout.box()
+        box.label(text="Saved Backups", icon='FILE_BACKUP')
+        if backed_up_objects:
+            for o in backed_up_objects:
+                row = box.row(align=True)
+                icon = 'OUTLINER_OB_MESH'
+                row.label(text=o.name, icon=icon)
+                op = row.operator("object.nf_restore_by_name", text="", icon='LOOP_BACK')
+                op.obj_name = o.name
+        else:
+            box.label(text="No backups saved", icon='INFO')
 
         layout.separator()
 
@@ -724,6 +873,8 @@ classes = (
     NF_OT_from_bevel_weight,
     NF_OT_from_auto_sharp,
     NF_OT_from_existing_bevel,
+    NF_OT_from_geometry,
+    NF_OT_restore_by_name,
     NF_OT_remove,
     NF_OT_clear_normals,
     NF_PT_main_panel,
