@@ -167,6 +167,12 @@ class NF_Properties(PropertyGroup):
         precision=2,
     )
 
+    show_bevel_options: BoolProperty(
+        name="Bevel Options",
+        description="Show or hide bevel modifier settings",
+        default=False,
+    )
+
 
 def ensure_object_mode(context):
     if context.object and context.object.mode != 'OBJECT':
@@ -583,30 +589,47 @@ def detect_bevel_faces(obj, ratio_threshold):
 
     cutoff = median_area * ratio_threshold
 
-    bevel_candidates = set()
-    original_indices = set()
+    small_faces = set()
+    large_faces = set()
     for face in bm.faces:
         if face.calc_area() < cutoff:
-            bevel_candidates.add(face.index)
+            small_faces.add(face.index)
         else:
-            original_indices.add(face.index)
+            large_faces.add(face.index)
 
-    confirmed_bevel = set()
+    if not small_faces or not large_faces:
+        bm.free()
+        return (0, set())
+
+    neighbors = {}
     for face in bm.faces:
-        if face.index not in bevel_candidates:
-            continue
-        has_large_neighbor = False
+        adj = set()
         for edge in face.edges:
             for linked in edge.link_faces:
-                if linked.index != face.index and linked.index in original_indices:
-                    has_large_neighbor = True
-                    break
-            if has_large_neighbor:
-                break
-        if has_large_neighbor:
-            confirmed_bevel.add(face.index)
-        else:
-            original_indices.add(face.index)
+                if linked.index != face.index:
+                    adj.add(linked.index)
+        neighbors[face.index] = adj
+
+    confirmed_bevel = set()
+    frontier = set()
+    for idx in large_faces:
+        for n in neighbors[idx]:
+            if n in small_faces:
+                frontier.add(n)
+
+    while frontier:
+        current = frontier.pop()
+        if current in confirmed_bevel:
+            continue
+        confirmed_bevel.add(current)
+        for n in neighbors[current]:
+            if n in small_faces and n not in confirmed_bevel:
+                frontier.add(n)
+
+    original_indices = large_faces.copy()
+    for idx in small_faces:
+        if idx not in confirmed_bevel:
+            original_indices.add(idx)
 
     bm.free()
     return len(confirmed_bevel), original_indices
@@ -772,38 +795,42 @@ class NF_PT_main_panel(Panel):
             return
 
         box = layout.box()
-        box.label(text="Bevel Settings", icon='MOD_BEVEL')
+        row = box.row(align=True)
+        row.prop(props, "show_bevel_options",
+                 icon='TRIA_DOWN' if props.show_bevel_options else 'TRIA_RIGHT',
+                 emboss=False)
 
-        col = box.column(align=True)
-        col.prop(props, "bevel_width")
-        col.prop(props, "bevel_segments")
-        col.prop(props, "bevel_profile", slider=True)
+        if props.show_bevel_options:
+            col = box.column(align=True)
+            col.prop(props, "bevel_width")
+            col.prop(props, "bevel_segments")
+            col.prop(props, "bevel_profile", slider=True)
 
-        col.separator()
-        col.prop(props, "bevel_affect")
-        col.prop(props, "bevel_offset_type")
+            col.separator()
+            col.prop(props, "bevel_affect")
+            col.prop(props, "bevel_offset_type")
 
-        col.separator()
-        row = col.row(align=True)
-        row.prop(props, "bevel_clamp_overlap")
-        row = col.row(align=True)
-        row.prop(props, "bevel_loop_slide")
+            col.separator()
+            row = col.row(align=True)
+            row.prop(props, "bevel_clamp_overlap")
+            row = col.row(align=True)
+            row.prop(props, "bevel_loop_slide")
 
-        col.separator()
-        row = col.row(align=True)
-        row.prop(props, "bevel_mark_seam")
-        row = col.row(align=True)
-        row.prop(props, "bevel_mark_sharp")
+            col.separator()
+            row = col.row(align=True)
+            row.prop(props, "bevel_mark_seam")
+            row = col.row(align=True)
+            row.prop(props, "bevel_mark_sharp")
 
-        col.separator()
-        col.prop(props, "bevel_miter_outer")
-        col.prop(props, "bevel_miter_inner")
-        if props.bevel_miter_inner == 'MITER_ARC':
-            col.prop(props, "bevel_spread")
+            col.separator()
+            col.prop(props, "bevel_miter_outer")
+            col.prop(props, "bevel_miter_inner")
+            if props.bevel_miter_inner == 'MITER_ARC':
+                col.prop(props, "bevel_spread")
 
-        col.separator()
-        col.prop(props, "bevel_vmesh_method")
-        col.prop(props, "bevel_face_strength_mode")
+            col.separator()
+            col.prop(props, "bevel_vmesh_method")
+            col.prop(props, "bevel_face_strength_mode")
 
         layout.separator()
 
