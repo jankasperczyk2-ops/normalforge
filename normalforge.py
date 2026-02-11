@@ -570,24 +570,46 @@ def detect_bevel_faces(obj, ratio_threshold):
     bm.from_mesh(obj.data)
     bm.faces.ensure_lookup_table()
 
-    areas = sorted([f.calc_area() for f in bm.faces])
-    if not areas:
+    if len(bm.faces) < 2:
         bm.free()
         return (0, set())
 
+    areas = sorted([f.calc_area() for f in bm.faces])
     median_area = areas[len(areas) // 2]
+
+    if median_area <= 0:
+        bm.free()
+        return (0, set())
+
     cutoff = median_area * ratio_threshold
 
-    bevel_count = 0
+    bevel_candidates = set()
     original_indices = set()
     for face in bm.faces:
-        if face.calc_area() >= cutoff:
-            original_indices.add(face.index)
+        if face.calc_area() < cutoff:
+            bevel_candidates.add(face.index)
         else:
-            bevel_count += 1
+            original_indices.add(face.index)
+
+    confirmed_bevel = set()
+    for face in bm.faces:
+        if face.index not in bevel_candidates:
+            continue
+        has_large_neighbor = False
+        for edge in face.edges:
+            for linked in edge.link_faces:
+                if linked.index != face.index and linked.index in original_indices:
+                    has_large_neighbor = True
+                    break
+            if has_large_neighbor:
+                break
+        if has_large_neighbor:
+            confirmed_bevel.add(face.index)
+        else:
+            original_indices.add(face.index)
 
     bm.free()
-    return bevel_count, original_indices
+    return len(confirmed_bevel), original_indices
 
 
 def select_faces_by_indices(obj, face_indices):
@@ -633,11 +655,15 @@ class NF_OT_from_geometry(Operator):
         ensure_object_mode(context)
 
         result = detect_bevel_faces(obj, props.detect_ratio)
-        if result[0] == 0:
+        bevel_count, original_indices = result
+
+        if bevel_count == 0:
             self.report({'WARNING'}, "No bevel faces detected — try adjusting the detection ratio")
             return {'CANCELLED'}
 
-        bevel_count, original_indices = result
+        if len(original_indices) == 0:
+            self.report({'WARNING'}, "No original faces found — all faces appear to be bevel geometry")
+            return {'CANCELLED'}
 
         create_mesh_backup(obj)
         ensure_smooth_shading(obj)
