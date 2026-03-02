@@ -1,0 +1,16 @@
+schema_version = "1.0.0"
+
+id = "normalforge"
+version = "3.0.0"
+name = "NormalForge"
+tagline = "One-click bevel + custom normals for Nanite-ready meshes"
+maintainer = "3DC Jan Kasperczyk <https://github.com/jankasperczyk2-ops>"
+type = "add-on"
+
+website = "https://github.com/jankasperczyk2-ops/normalforge"
+
+blender_version_min = "4.2.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
