@@ -16,7 +16,7 @@
 
 bl_info = {
     "name": "NormalForge",
-    "author": "Jan Kasperczyk",
+    "author": "3DC Jan Kasperczyk",
     "version": (3, 0, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > NormalForge",
